@@ -20,6 +20,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
 using Cassandra.Mapping.TypeConversion;
+using Cassandra.Serialization;
 
 // ReSharper disable once CheckNamespace
 namespace Cassandra
@@ -29,7 +30,14 @@ namespace Cassandra
     /// </summary>
     public class Row : IEnumerable<object>, IRow
     {
-        private readonly object[] _rowValues;
+        private readonly byte[] _data;
+
+        private readonly int[] _dataOffsets;
+        
+        private readonly int[] _dataLengths;
+
+        private readonly ISerializer _serializer;
+        
         /// <summary>
         /// Gets or sets the index of the columns within the row
         /// </summary>
@@ -51,7 +59,7 @@ namespace Cassandra
         /// </summary>
         public int Length
         {
-            get { return _rowValues.Length; }
+            get { return _dataLengths.Length; }
         }
 
         /// <summary>
@@ -91,11 +99,14 @@ namespace Cassandra
             ColumnIndexes = columnIndexes;
         }
 
-        internal Row(object[] values, CqlColumn[] columns, Dictionary<string, int> columnIndexes)
+        internal Row(byte[] data, CqlColumn[] columns, Dictionary<string, int> columnIndexes, ISerializer serializer, int[] dataOffsets, int[] dataLengths)
         {
-            _rowValues = values;
+            _data = data;
             Columns = columns;
             ColumnIndexes = columnIndexes;
+            _serializer = serializer;
+            _dataOffsets = dataOffsets;
+            _dataLengths = dataLengths;
         }
 
         /// <summary>
@@ -125,7 +136,7 @@ namespace Cassandra
         /// </summary>
         public virtual bool IsNull(int index)
         {
-            return _rowValues[index] == null;
+            return _dataLengths[index] == 0;
         }
 
         /// <summary>
@@ -162,8 +173,14 @@ namespace Cassandra
         /// <returns></returns>
         public object GetValue(Type type, int index)
         {
-            var value = _rowValues[index];
-            return value == null ? null : TryConvertToType(value, Columns[index], type);
+            var dataOffset = _dataOffsets[index];
+            var dataLength = _dataLengths[index];
+            if (dataLength == 0)
+                return null;
+
+            var c = Columns[index];
+            var value = _serializer.Deserialize(_data, dataOffset, dataLength, c.TypeCode, c.TypeInfo);
+            return TryConvertToType(value, c, type);
         }
 
         /// <summary>

@@ -15,6 +15,8 @@
 //
 
 using System;
+using System.Buffers;
+using System.Collections.Generic;
 using System.Threading;
 using Cassandra.Requests;
 
@@ -76,21 +78,50 @@ namespace Cassandra
 
         internal virtual Row ProcessRowItem(FrameReader reader, RowSetMetadata resultMetadata)
         {
-            var rowValues = new object[resultMetadata.Columns.Length];
+            var dataChunks = new byte[resultMetadata.Columns.Length][];
+            var lengths = new int[resultMetadata.Columns.Length];
+           
             for (var i = 0; i < resultMetadata.Columns.Length; i++)
             {
                 var c = resultMetadata.Columns[i];
                 var length = reader.ReadInt32();
                 if (length < 0)
                 {
-                    rowValues[i] = null;
+                    dataChunks[i] = null;
+                    lengths[i] = 0;
                     continue;
                 }
-                var buffer = GetBuffer(length, c.TypeCode);
-                rowValues[i] = reader.ReadFromBytes(buffer, 0, length, c.TypeCode, c.TypeInfo);
+                
+
+                var rentedArray = ArrayPool<byte>.Shared.Rent(length);
+                reader.Read(rentedArray, 0, length);
+                dataChunks[i] = rentedArray;
+                lengths[i] = length;
             }
 
-            return new Row(rowValues, resultMetadata.Columns, resultMetadata.ColumnIndexes);
+            var totalLength = 0;
+            foreach (var length in lengths)
+            {
+                totalLength += length;
+            }
+
+            var buffer = new byte[totalLength];
+            var offset = 0;
+            var offsets = new int[resultMetadata.Columns.Length];
+            for (var i = 0; i < resultMetadata.Columns.Length; i++)
+            {
+                var dataChunk = dataChunks[i];
+                var length = lengths[i];
+                var readOnlySpan = new ReadOnlySpan<byte>(dataChunk, 0, length);
+                var destination = new Span<byte>(buffer, offset, length);
+                readOnlySpan.CopyTo(destination);
+                ArrayPool<byte>.Shared.Return(dataChunk);
+                offsets[i] = offset;
+                offset += length;
+            }
+
+
+            return new Row(buffer, resultMetadata.Columns, resultMetadata.ColumnIndexes, reader.Serializer, offsets, lengths);
         }
 
         /// <summary>
